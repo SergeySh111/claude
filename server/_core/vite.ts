@@ -48,13 +48,21 @@ export async function setupVite(app: Express, server: Server) {
 }
 
 export function serveStatic(app: Express) {
-  // In production, built files are in dist/public (relative to project root)
-  // In development, they're in dist/public (but we use Vite dev server instead)
-  const distPath = path.resolve(import.meta.dirname, "../..", "dist", "public");
+  // In production (running from dist/index.js), import.meta.dirname is 'dist/'
+  // so 'public' subfolder is at 'dist/public'
+  let distPath = path.resolve(import.meta.dirname, "public");
+  
+  // Fallback for development: try path from server/_core/
+  if (!fs.existsSync(distPath)) {
+    distPath = path.resolve(import.meta.dirname, "../..", "dist", "public");
+  }
+  
   if (!fs.existsSync(distPath)) {
     console.error(
       `Could not find the build directory: ${distPath}, make sure to build the client first`
     );
+  } else {
+    console.log(`Serving static files from: ${distPath}`);
   }
 
   app.use(express.static(distPath));
