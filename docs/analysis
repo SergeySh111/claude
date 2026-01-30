@@ -1,0 +1,324 @@
+metric-cohort-audit.md
+# Project Analysis – Checkpoint
+
+Status: Option A (Metric & Cohort Math) COMPLETED  
+Date: 2026-01-27
+
+Next step: Option B (AI pipeline)
+
+Context summary:
+- End-to-end CSV → backend → frontend metric & cohort flow fully traced
+- All formulas, cohort definitions, time windows, and edge cases documented
+- Major duplication points identified (Node / frontend / Python)
+- Python FastAPI identified as auxiliary / batch analytics path
+
+Open questions / to verify:
+- Timezone handling (frontend parseISO uses local timezone)
+- Safety of lexicographic date sorting in /process-daily
+- Whether FastAPI is invoked anywhere in production flow
+I’ll map the AI flow from the UI trigger through payload generation to the OpenAI call and back into the sidebar, then call out duplication and security implications with file paths for each step.
+1) UI trigger for AI analysis
+Primary trigger:
+File: client/src/pages/Home.tsx
+Component: AIChatSidebar is toggled by the “AI Assistant” button in the header.
+Key points:
+Home computes aiPayload whenever both summary and daily data are present:
+Home.tsx
+Lines 12-147
+const aiPayload = hasData  ? generateAIPayload(dailyData, dateRange, activeTab, activeSource)  : "NO DATA FOUND\n\nPlease upload CSV files to begin analysis.";
+The AI sidebar is opened via:
+Home.tsx
+Lines 12-175
+<Button  onClick={() => setShowAISidebar(!showAISidebar)}  ...>  <Bot size={16} />  AI Assistant</Button>
+When open, Home renders:
+Home.tsx
+Lines 12-461
+<AIChatSidebar  isOpen={showAISidebar}  onClose={() => setShowAISidebar(false)}  onOpenSettings={() => setShowSettings(true)}  aiPayload={aiPayload}  hasAPIKey={!!getOpenAIKey()}/>
+Within the sidebar, AI calls are triggered by:
+Clicking the Send button, or
+Pressing Enter (without Shift) in the textarea.
+File: client/src/components/dashboard/ai-chat-sidebar.tsx:
+ai-chat-sidebar.tsx
+Lines 11-86
+if (e.key === "Enter" && !e.shiftKey) {  e.preventDefault();  handleSend();}...<Button onClick={handleSend} ...>
+If no API key, handleSend opens settings instead of calling AI.
+2) Payload generation (generateAIPayload / prepareAnalysisPayload)
+a) generateAIPayload (string summary for the sidebar)
+File: client/src/lib/ai-payload-generator.ts
+Called from Home as shown above.
+Inputs:
+generateAIPayload(  rawDailyData: RawCampaignData[],  dateRange: string,  activeTab: string,      // product filter  activeSource: string    // source filter): string
+rawDailyData: full daily CSV rows (already filtered by uploaded file, not by product/source).
+dateRange: human string, e.g. "Oct 28, 2024 - Nov 12, 2024".
+activeTab: product context (All, P2P, PaymePlus, Payments, Reach, Other).
+activeSource: source context (All, Facebook, Google, Bigo, Other).
+Transformations (high-level):
+Seasonality context via getSeasonalityContext(dateRangeStr):
+Parses date range; checks overlap with:
+Black Friday (Nov 20–30).
+New Year Rush (Dec 20–31).
+Post-Holiday Slump (Jan 1–10).
+Returns a fixed text string like “Black Friday Period … high CPM…” or “Standard business season.”
+Global benchmarks (D0/D3/D7/final ROAS):
+Loops through each row:
+Cost → numeric.
+getRevenueForDay(row, d) for d = 0, 3, 7 using cumulative columns.
+getLatestRevenue(row) for final day (largest day with data).
+Aggregates to totalCost, totalRevenueD0, totalRevenueD3, totalRevenueD7, totalRevenueFinal.
+Computes:
+     benchmarkD0 = totalCost > 0 ? (totalRevenueD0 / totalCost) * 100 : 0;     // similarly D3, D7     globalROAS  = totalCost > 0 ? (totalRevenueFinal / totalCost) * 100 : 0;
+Week-level cohorts for anomaly detection:
+Groups rows by ISO week of Date into weekMap<weekNum, WeekCohort>.
+Each WeekCohort tracks:
+cost, revenueD0, revenueD3, revenueD7.
+Derived roasD0, roasD3, roasD7.
+status string and retentionIssue flag.
+Anomaly rating per week:
+For each week:
+     if benchmarkD7 > 0:       d7Ratio = week.roasD7 / benchmarkD7       if d7Ratio < 0.8 → status = "📉 Underperforming"       if d7Ratio > 1.2 → status = "🚀 Outperforming"       else "Normal"
+Retention issues:
+     if week.roasD0 > benchmarkD0 && week.roasD7 < benchmarkD7 * 0.9:       retentionIssue = true;       status += " ⚠️ Retention Issue";
+Campaign-level profit and ROAS:
+Builds campaignStats map { cost, revenue, rows } per Campaign.
+Computes profit and roas per campaign, then sorts for:
+Top 3 performers (by profit).
+Bottom 3 performers (by profit).
+Product breakdown (P2P / PaymePlus / Payments / Reach / Other):
+Uses determineCategory(campaignName) to assign each row to a product.
+Builds productStats with cost, revenue, campaign count.
+Identifies:
+Best ROAS product.
+Highest volume product (by spend).
+Summarizes them in text like:
+Best ROAS: PaymePlus (110.3%)
+Highest Volume: P2P ($123,456 spend).
+Velocity tracking (week-over-week D0 ROAS):
+For sorted weekCohorts, compare consecutive weeks:
+If D0 ROAS improved → 🟢 Improving Start (+X.X% vs Week N-1).
+If declined → 🔴 Weakening Start (-Y.Y% vs Week N-1).
+Joins these into a “COHORT VELOCITY” section.
+Final summary string:
+Constructs a multi-section markdown-like text:
+SEASONALITY CONTEXT
+CONTEXT (filters, period, counts)
+GLOBAL BENCHMARK ROAS CURVE
+PRODUCT WINNERS
+COHORT VELOCITY
+WEEKLY COHORT ANALYSIS (per-week D0/D3/D7 and status flags)
+GLOBAL BENCHMARKS (totals, profit, ROAS)
+TOP 3 / BOTTOM 3 performers
+INSTRUCTIONS FOR AI & METHODOLOGY NOTE.
+Tests in server/ai-payload-generator.test.ts verify presence and order of these sections.
+b) prepareAnalysisPayload / analyzeWithAI (structured JSON flow)
+Files:
+client/src/lib/benchmark-calculator.ts → prepareAnalysisPayload.
+client/src/lib/openai-service.ts → analyzeWithAI.
+This is a parallel AI integration returning structured “analysis text” plus metadata (not currently wired into the main UI).
+Inputs to prepareAnalysisPayload:
+prepareAnalysisPayload(  campaigns: ProcessedCampaign[],  cohortData: CohortDataPoint[],  weekLabels: string[],  dailyData: RawCampaignData[]): AnalysisPayload
+Transformations:
+calculateGlobalROAS(campaigns) and calculateGlobalCPI(campaigns) (weighted averages).
+calculateWeeklyTrend(cohortData, weekLabels):
+Uses the last 3 cohort points (expected to represent weeks) and takes cohort.day30 as final ROAS.
+Identifies:
+Top 3 performers and bottom 3 by profit.
+Outliers using detectOutliers(campaigns, globalROAS):
+Deviation > 20% from global ROAS.
+calculateDateContext(dailyData):
+Extracts min/max dates and builds:
+reportPeriod (e.g., "Nov 01, 2025 - Nov 30, 2025").
+validWeeks string array like ["Week 44", "Week 45"].
+analyzeWithAI then:
+Builds a systemPrompt describing strict constraints and required format.
+Builds a userPrompt that serializes payload into textual sections.
+Calls OpenAI and post-processes response with filterHallucinatedWeeks (removes lines mentioning weeks not in validWeeks).
+3) Deterministic summary: rules & thresholds
+These rules are deterministic and pre-computed before involving OpenAI.
+Location: client/src/lib/ai-payload-generator.ts
+Seasonality thresholds:
+Overlap with:
+Black Friday: Nov 20–30 → “High CPM, high competition, drop in ROAS.”
+New Year Rush: Dec 20–31.
+Post-Holiday Slump: Jan 1–10.
+Global benchmark curve:
+ROAS D0/D3/D7 and total ROAS as precise percentages.
+Week anomaly thresholds:
+D7 < 0.8 × benchmarkD7 → “📉 Underperforming”.
+D7 > 1.2 × benchmarkD7 → “🚀 Outperforming”.
+D0 > benchmarkD0 and D7 < 0.9 × benchmarkD7 → retention issue flag.
+Product winners:
+Best ROAS product is product with highest ROAS.
+Highest Volume product is product with highest cost.
+Velocity tracking:
+Uses relative change in D0 ROAS vs previous week:
+If >0 → “🟢 Improving Start (+X.X% vs Week Y)”.
+If <0 → “🔴 Weakening Start (-Y.Y% vs Week Y)”.
+Top/bottom performers:
+Sorted by profit, top 3 and bottom 3.
+Location: client/src/lib/benchmark-calculator.ts
+Outlier detection:
+|campaign.roas - globalROAS| / globalROAS > 0.2 (20% deviation).
+Reason strings: “X% above/below average”.
+Weekly trend:
+Final ROAS for each cohort (assumes day30 field in CohortDataPoint).
+Valid week guarding:
+calculateDateContext defines valid ISO weeks seen in the data.
+Hallucination filter (filterHallucinatedWeeks in openai-service.ts):
+Strips lines referencing week numbers not in payload.meta.validWeeks.
+4) OpenAI call details
+There are two OpenAI integrations, but the one actually used by the sidebar is sendChatMessage.
+a) sendChatMessage (used by AIChatSidebar)
+File: client/src/lib/ai-chat-service.ts
+Called from: AIChatSidebar.handleSend.
+Call details:
+const response = await fetch("https://api.openai.com/v1/chat/completions", {  method: "POST",  headers: {    "Content-Type": "application/json",    "Authorization": `Bearer ${apiKey}`,  },  body: JSON.stringify({    model: "gpt-4o-mini",    messages: [      { role: "system", content: systemPrompt }, // includes full summaryText      { role: "user", content: userQuestion },    ],    temperature: 0.5,    max_tokens: 800,  }),});
+Model: gpt-4o-mini.
+Messages:
+System message is a long, detailed instruction that:
+Describes the role (Head of UA).
+Specifies response structure (Seasonal Impact, Product Battle, Cohort Health, Anomalies).
+Embeds entire precomputed summaryText (the output of generateAIPayload).
+User message is your current question.
+Temperature: 0.5 (moderately creative, but summary is strongly constrained).
+Max tokens: 800.
+Retry / errors:
+No automatic retry.
+Error handling:
+401 → “Invalid API key. Please check your OpenAI API key in Settings.”
+429 → “Rate limit exceeded. Please try again in a moment.”
+Any other error → OpenAI API error: {statusText} or nested error.message.
+If response OK but content missing → “No response received from AI”.
+b) analyzeWithAI (structured analysis path, not wired into UI)
+File: client/src/lib/openai-service.ts
+Uses prepareAnalysisPayload and then calls OpenAI.
+Call details:
+const response = await fetch("https://api.openai.com/v1/chat/completions", {  method: "POST",  headers: {    "Content-Type": "application/json",    "Authorization": `Bearer ${apiKey}`,  },  body: JSON.stringify({    model: "gpt-4o-mini",    messages: [      { role: "system", content: systemPrompt },      { role: "user", content: userPrompt },    ],    temperature: 0.3,    max_tokens: 600,  }),});
+Model: gpt-4o-mini.
+Temperature: 0.3 (more factual).
+Max tokens: 600.
+Post-processing:
+filterHallucinatedWeeks strips any lines referencing weeks outside valid weeks.
+Error handling: identical to sendChatMessage.
+Currently, analyzeWithAI is unused by the main UI; the AI sidebar uses sendChatMessage instead.
+5) UX integration
+Where narrative is rendered
+File: client/src/components/dashboard/ai-chat-sidebar.tsx
+AI answers are rendered in the chat stream as assistant messages:
+ai-chat-sidebar.tsx
+Lines 11-172
+<Streamdown>{msg.content}</Streamdown>
+Uses Streamdown to render markdown-like content (headings, bullets, bold, emojis).
+Loading states
+isLoading state in sidebar:
+When a message is being processed:
+The send button is disabled.
+Input is disabled.
+A “Thinking…” bubble with spinning icon is shown:
+ai-chat-sidebar.tsx
+Lines 11-193
+{isLoading && (  <div className="flex justify-start">    <div className="bg-slate-100 rounded-lg p-3 flex items-center gap-2">      <Loader2 className="animate-spin" />      <span>Thinking...</span>    </div>  </div>)}
+Caching
+AI chat state is local to the component:
+messages: Message[] kept in useState.
+No server-side or localStorage caching of AI responses.
+aiPayload is recomputed in Home when filters or data change; sidebar receives the latest summary each time it’s opened.
+“No data” behavior
+If no summary+daily data:
+aiPayload is set to:
+Home.tsx
+Lines 12-147
+"NO DATA FOUND\n\nPlease upload CSV files to begin analysis.";
+In sendChatMessage:
+ai-chat-service.ts
+Lines 8-19
+if (summaryText.startsWith("NO DATA FOUND")) {  return summaryText; // returns the no-data message directly}
+So the first AI response will simply echo that “NO DATA FOUND” message instead of calling the API.
+Empty chat state UX
+Initial view in AIChatSidebar when no messages:
+ai-chat-sidebar.tsx
+Lines 11-128
+- Shows “AI Analyst Ready”- Provides 3 suggestion buttons:  - What are the key trends this week?  - Which campaigns should I scale?  - Show me underperforming campaigns- Clicking a suggestion just pre-fills `input` (does not auto-send).
+Settings / missing API key
+If hasAPIKey is false:
+A warning banner appears above the input:
+ai-chat-sidebar.tsx
+Lines 11-207
+⚠️ Please add your OpenAI API key in settings to use AI features.
+On send attempt with no key, handleSend will just onOpenSettings(), opening settings modal.
+6) Security: API key storage and call location
+Where the API key lives
+File: client/src/components/dashboard/settings-modal.tsx
+Storage key: localStorage["openai_api_key"].
+SettingsModal reads/writes from this key.
+getOpenAIKey() helper returns the stored key.
+File: client/src/components/dashboard/ai-chat-sidebar.tsx
+On send, it reads:
+ai-chat-sidebar.tsx
+Lines 11-61
+const apiKey = localStorage.getItem("openai_api_key") || "";
+Server-side vs client-side
+All OpenAI calls are made directly from the browser:
+sendChatMessage and analyzeWithAI call fetch("https://api.openai.com/v1/chat/completions", ...) client-side.
+There is no server-side proxy for OpenAI in this app.
+Security implications:
+API key never touches your Node server; it stays in the browser.
+However, this means:
+The key is visible to the user’s browser and could be inspected via DevTools.
+The app is suitable for personal usage / trusted environment, not multi-user SaaS where you must keep keys server-side.
+Other LLM integrations
+File: server/_core/llm.ts
+Uses ENV.forgeApiKey and a server-side Forge/Manus endpoint.
+This is separate from OpenAI and not used by the AI sidebar.
+7) Duplicated logic: ai-payload-generator.ts vs benchmark-calculator.ts
+Both modules implement overlapping analytics for AI, but in different shapes.
+Shared or similar concepts:
+Global ROAS & CPI:
+ai-payload-generator.ts:
+Computes benchmark ROAS (D0, D3, D7, final) directly from daily data.
+benchmark-calculator.ts:
+calculateGlobalROAS(campaigns).
+calculateGlobalCPI(campaigns).
+Weekly ROAS trend:
+ai-payload-generator.ts:
+Builds weekCohorts with D0/D3/D7 ROAS and status.
+benchmark-calculator.ts:
+calculateWeeklyTrend(cohortData, weekLabels):
+Uses day30 field in CohortDataPoint to build a 3-week ROAS trend.
+Both represent week-level ROAS movement, but from different data shapes.
+Top / bottom performers:
+ai-payload-generator.ts:
+From campaignStats using profit per campaign, builds:
+Top 3 performers.
+Bottom 3 performers.
+benchmark-calculator.ts:
+In prepareAnalysisPayload, sorts ProcessedCampaign[] by profit and builds:
+topPerformers.
+underperformers.
+Outlier detection:
+Implemented only in benchmark-calculator.ts (detectOutliers + payload.outliers).
+Logically similar to “outperformance / underperformance” defined in ai-payload-generator via benchmark comparisons, but implemented differently (global 20% deviation vs. relative to weekly benchmark).
+Date context / valid weeks:
+ai-payload-generator.ts:
+Uses ISO weeks in anomaly detection but does not explicitly expose valid week list in its output.
+benchmark-calculator.ts:
+calculateDateContext(dailyData) returns:
+reportPeriod.
+validWeeks set (strings), minDate, maxDate.
+Both reason about weeks and report periods, but with duplicated date math.
+Seasonality & narrative structure:
+ai-payload-generator.ts: builds explicit “SEASONALITY CONTEXT”, “PRODUCT WINNERS”, “COHORT VELOCITY”, etc.
+benchmark-calculator.ts + openai-service.ts:
+Provide a different narrative structure (Scale / Stop-Fix / Anomalies) via system prompt & payload.
+Net result:
+You effectively have two AI pipelines:
+Current UI path:
+generateAIPayload → long deterministic markdown summary → sendChatMessage → AIChatSidebar.
+Alternative structured path (not wired into UI):
+prepareAnalysisPayload → analyzeWithAI → AIAnalysisResult.
+Both compute overlapping metrics (global ROAS, week trends, top/bottom performers), but with:
+Different representations (string vs JSON).
+Different thresholds (cohort anomaly vs 20% deviation).
+Different prompts and output expectations.
+If you’d like, next we can either:
+Consolidate these into one canonical AI analytics pipeline (eliminating duplication), or
+Wire the structured analyzeWithAI path into the UI (e.g., a second AI mode) while keeping the current summary-based chat.

@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1764941684388,
+      "tag": "0000_youthful_marvex",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1764941717987,
+      "tag": "0001_glorious_silver_samurai",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1764942742559,
+      "tag": "0002_shiny_ultimates",
+      "breakpoints": true
+    }
+  ]
+}
