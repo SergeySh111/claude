@@ -6,6 +6,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import csvRoutes from "../csv-routes";
 import aiRoutes from "../ai-routes";
+import bigqueryRoutes from "../bigquery-routes";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -41,6 +42,8 @@ async function startServer() {
   app.use("/api", csvRoutes);
   // AI analysis routes (server-side OpenAI)
   app.use("/api/ai", aiRoutes);
+  // BigQuery integration routes
+  app.use("/api/bigquery", bigqueryRoutes);
   // tRPC API
   app.use(
     "/api/trpc",

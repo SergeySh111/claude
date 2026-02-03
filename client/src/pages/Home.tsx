@@ -8,12 +8,13 @@ import { MethodologySection } from "@/components/dashboard/methodology-section";
 import { ViewToggle } from "@/components/dashboard/view-toggle";
 import { SettingsModal } from "@/components/dashboard/settings-modal";
 import { AIChatSidebar } from "@/components/dashboard/ai-chat-sidebar";
+import { BigQueryConfigModal } from "@/components/dashboard/bigquery-config-modal";
 import { prepareAnalysisPayload } from "@/lib/benchmark-calculator";
 import type { CanonicalAnalyticsSnapshot, AiFilters } from "@shared/ai";
 
 import { aggregateData, calculateMetrics, ChartDataPoint, CohortDataPoint, parseCSV, ProcessedCampaign, RawCampaignData } from "@/lib/data-processor";
 
-import { BarChart3, ChevronDown, ChevronUp, CreditCard, DollarSign, Rocket, TrendingUp, Users, Wallet, Facebook, Globe, Video, Settings, Bot } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronUp, CreditCard, DollarSign, Rocket, TrendingUp, Users, Wallet, Facebook, Globe, Video, Settings, Bot, Database } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -45,6 +46,7 @@ export default function Home() {
   // AI Sidebar State
   const [showSettings, setShowSettings] = useState(false);
   const [showAISidebar, setShowAISidebar] = useState(false);
+  const [showBigQuery, setShowBigQuery] = useState(false);
 
   // Handle File Uploads
   const handleSummaryUpload = async (file: File) => {
@@ -222,6 +224,16 @@ export default function Home() {
                     <ViewToggle view={view} onViewChange={setView} />
 
                     <Button
+                      onClick={() => setShowBigQuery(true)}
+                      variant="outline"
+                      size="sm"
+                      className="gap-2"
+                      title="BigQuery Configuration"
+                    >
+                      <Database size={16} />
+                    </Button>
+
+                    <Button
                       onClick={() => setShowSettings(true)}
                       variant="outline"
                       size="sm"
@@ -281,6 +293,31 @@ export default function Home() {
                   ) : (
                     <FileUploader onFileUpload={handleDailyUpload} />
                   )}
+                </div>
+              </div>
+
+              {/* BigQuery Alternative */}
+              <div className="col-span-1 md:col-span-2 mt-4">
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-xl border border-blue-200">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-blue-100 rounded-lg">
+                        <Database className="w-6 h-6 text-blue-600" />
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-slate-900">Or connect to BigQuery</h3>
+                        <p className="text-sm text-slate-500">Automatically fetch data from AppsFlyer via BigQuery</p>
+                      </div>
+                    </div>
+                    <Button
+                      onClick={() => setShowBigQuery(true)}
+                      variant="outline"
+                      className="bg-white"
+                    >
+                      <Database className="w-4 h-4 mr-2" />
+                      Configure BigQuery
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -479,6 +516,23 @@ export default function Home() {
       <SettingsModal 
         open={showSettings} 
         onOpenChange={setShowSettings} 
+      />
+
+      {/* BigQuery Configuration Modal */}
+      <BigQueryConfigModal
+        isOpen={showBigQuery}
+        onClose={() => setShowBigQuery(false)}
+        onDataFetched={(summaryRows, dailyRows) => {
+          // Convert BigQuery data to expected format and set state
+          if (summaryRows.length > 0) {
+            setSummaryData(summaryRows as any);
+          }
+          if (dailyRows.length > 0) {
+            setDailyData(dailyRows as any);
+          }
+          toast.success("Data fetched from BigQuery!");
+          setShowBigQuery(false);
+        }}
       />
     </div>
   );
